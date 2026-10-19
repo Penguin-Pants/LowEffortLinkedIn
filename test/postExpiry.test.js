@@ -1,5 +1,5 @@
 const { loadConfig } = require('../src/config');
-const { runPostExpiry, startPostExpiryJob } = require('../src/jobs/postExpiry');
+const { runPostExpiry, startPostExpiryJob, REVERSIBLE_RETRY_MS } = require('../src/jobs/postExpiry');
 
 function testConfig(extra = {}) {
   return loadConfig({
@@ -157,16 +157,9 @@ describe('runPostExpiry', () => {
     expect(postUpdates).toHaveLength(0); // not stamped — retries next run
   });
 
-  test.each([
-    'message_not_found',
-    'channel_not_found',
-    'invalid_channel_id',
-    'cant_update_message',
-    'edit_window_closed',
-    'is_inactive',
-  ])('a card that can never be updated (%s) counts as closed, so the post is not retried forever', async (code) => {
-    const { db, postUpdates } = fakeDb({
-      duePosts: [duePost('post-1')],
+  function oneGoneOneOkCard(code, postOverrides = {}) {
+    const parts = fakeDb({
+      duePosts: [duePost('post-1', postOverrides)],
       cardsByPost: {
         'post-1': [
           { slack_channel_id: 'C_GONE', slack_message_ts: '1.1' },
@@ -183,14 +176,50 @@ describe('runPostExpiry', () => {
       },
     };
     const logger = { ...quiet, warn: jest.fn(), error: jest.fn() };
+    return { ...parts, slackClient, logger };
+  }
 
-    const result = await runPostExpiry({ db, slackClient, logger }, NOW);
+  test.each(['message_not_found', 'invalid_channel_id', 'cant_update_message'])(
+    'a card that can never be updated (%s) counts as closed at once, so the post is not retried forever',
+    async (code) => {
+      const { db, postUpdates, slackClient, logger } = oneGoneOneOkCard(code);
 
-    expect(result).toEqual({ due: 1, closed: 1 });
-    expect(postUpdates).toEqual([expect.objectContaining({ expired_at: 'NOW' })]);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(code));
-    expect(logger.error).not.toHaveBeenCalled();
-  });
+      const result = await runPostExpiry({ db, slackClient, logger }, NOW);
+
+      expect(result).toEqual({ due: 1, closed: 1 });
+      expect(postUpdates).toEqual([expect.objectContaining({ expired_at: 'NOW' })]);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(code));
+      expect(logger.error).not.toHaveBeenCalled();
+    }
+  );
+
+  test.each(['channel_not_found', 'is_inactive', 'edit_window_closed'])(
+    'a reversible Slack state (%s) keeps retrying inside the grace period (channel unarchived, bot re-invited, edits re-allowed)',
+    async (code) => {
+      const { db, postUpdates, slackClient, logger } = oneGoneOneOkCard(code);
+
+      const result = await runPostExpiry({ db, slackClient, logger }, NOW);
+
+      expect(result).toEqual({ due: 1, closed: 0 });
+      expect(postUpdates).toHaveLength(0);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(code));
+    }
+  );
+
+  test.each(['channel_not_found', 'is_inactive', 'edit_window_closed'])(
+    'a reversible Slack state (%s) counts as closed once the grace period has passed',
+    async (code) => {
+      const expiresAt = new Date(NOW.getTime() - REVERSIBLE_RETRY_MS);
+      const { db, postUpdates, slackClient, logger } = oneGoneOneOkCard(code, { expires_at: expiresAt });
+
+      const result = await runPostExpiry({ db, slackClient, logger }, NOW);
+
+      expect(result).toEqual({ due: 1, closed: 1 });
+      expect(postUpdates).toEqual([expect.objectContaining({ expired_at: 'NOW' })]);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(code));
+      expect(logger.error).not.toHaveBeenCalled();
+    }
+  );
 
   test('does nothing when nothing is due', async () => {
     const { db, postUpdates } = fakeDb({ duePosts: [] });
