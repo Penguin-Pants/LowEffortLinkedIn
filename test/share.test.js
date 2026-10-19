@@ -367,6 +367,62 @@ describe('runSharePipeline', () => {
     }
   });
 
+  test('a hung refresh that wakes after the wait cap cannot overwrite newer counts', async () => {
+    jest.useFakeTimers();
+    let unhang;
+    let first;
+    try {
+      const cards = [
+        { slack_channel_id: 'C_ONE', slack_message_ts: '1.1' },
+        { slack_channel_id: 'C_TWO', slack_message_ts: '2.2' },
+      ];
+      const dbParts = fakeDb({ cards });
+      const innerDb = dbParts.db;
+      // Count snapshot at query time, like a real DB read.
+      const db = (table) => {
+        const builder = innerDb(table);
+        if (table !== 'shares') return builder;
+        return {
+          ...builder,
+          where: (criteria) => ({
+            ...builder.where(criteria),
+            count: async () => [
+              { count: String(dbParts.shareInserts.filter((r) => r.status === 'success').length) },
+            ],
+          }),
+        };
+      };
+      db.fn = innerDb.fn;
+      const client = fakeClient();
+      // Share 1's update of card 1 hangs past the wait cap.
+      client.chat.update.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            unhang = resolve;
+          })
+      );
+      const d = { ...deps({ dbParts, client }), db };
+
+      first = runSharePipeline(d, { ...JOB, userId: 'U901' });
+      await jest.advanceTimersByTimeAsync(0);
+      const second = runSharePipeline(d, { ...JOB, userId: 'U902' });
+      await jest.advanceTimersByTimeAsync(20_000);
+      await second; // share 2 wrote count 2 to both cards
+      unhang({ ok: true }); // share 1 wakes up holding count 1
+      await first;
+
+      const lastForCardTwo = client.chat.update.mock.calls
+        .map((c) => c[0])
+        .filter((u) => u.channel === 'C_TWO')
+        .pop();
+      expect(JSON.stringify(lastForCardTwo.blocks)).toContain('✅ 2 shares');
+    } finally {
+      unhang?.({ ok: true });
+      await first;
+      jest.useRealTimers();
+    }
+  });
+
   test('multi-channel post: every card gets the counter update and first-share reaction', async () => {
     const cards = [
       { slack_channel_id: 'C_ONE', slack_message_ts: '1.1' },

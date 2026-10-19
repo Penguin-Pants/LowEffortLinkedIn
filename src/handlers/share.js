@@ -60,27 +60,32 @@ async function handleRevokedToken({ db, config, client }, { userId, channelId })
 // Card refreshes for one post run one at a time. Two concurrent shares each
 // read the share count; without this, the older read can finish last and
 // leave the card one share behind. In-memory is enough: the app is a single
-// process (PLAN.md §3). post id -> tail of that post's refresh chain.
+// process (PLAN.md §3). post id -> { tail, state } of the latest refresh.
 const cardRefreshQueues = new Map();
 // Slack's WebClient has no request timeout by default, so a hung refresh
 // must not hold the next one (and its share pipeline) forever: after this
-// long the next refresh runs anyway.
+// long the next refresh runs anyway, and the hung one is marked superseded
+// so it writes nothing more if it ever wakes up with its older count.
 const CARD_REFRESH_WAIT_MS = 20_000;
 
 function queueCardRefresh(postId, refresh) {
-  const previous = cardRefreshQueues.get(postId) || Promise.resolve();
+  const previous = cardRefreshQueues.get(postId);
+  const state = { superseded: false };
   let timer;
   const waitCap = new Promise((resolve) => {
-    timer = setTimeout(resolve, CARD_REFRESH_WAIT_MS);
+    timer = setTimeout(() => {
+      if (previous) previous.state.superseded = true;
+      resolve();
+    }, CARD_REFRESH_WAIT_MS);
     timer.unref?.();
   });
-  const run = Promise.race([previous, waitCap])
+  const run = Promise.race([previous ? previous.tail : Promise.resolve(), waitCap])
     .finally(() => clearTimeout(timer))
-    .then(refresh);
-  const tail = run.catch(() => {});
-  cardRefreshQueues.set(postId, tail);
-  tail.then(() => {
-    if (cardRefreshQueues.get(postId) === tail) cardRefreshQueues.delete(postId);
+    .then(() => refresh(state));
+  const entry = { tail: run.catch(() => {}), state };
+  cardRefreshQueues.set(postId, entry);
+  entry.tail.then(() => {
+    if (cardRefreshQueues.get(postId) === entry) cardRefreshQueues.delete(postId);
   });
   return run;
 }
@@ -90,10 +95,10 @@ function queueCardRefresh(postId, refresh) {
 // been broadcast to several channels; every card is refreshed so the counter
 // stays in sync everywhere (one card's Slack failure doesn't block the rest).
 function updateCardCounter(deps, post) {
-  return queueCardRefresh(post.id, () => refreshCards(deps, post));
+  return queueCardRefresh(post.id, (state) => refreshCards(deps, post, state));
 }
 
-async function refreshCards({ db, client, logger }, post) {
+async function refreshCards({ db, client, logger }, post, state) {
   // Re-read the row rather than trusting the pipeline's snapshot: a share
   // that lands moments before expires_at races the expiry cron, and
   // rebuilding from a snapshot whose expired_at is still null would put the
@@ -111,6 +116,7 @@ async function refreshCards({ db, client, logger }, post) {
   const shareCount = Number(count);
   const blocks = buildPostCard({ post: { ...fresh, expired_at: expiredAt }, shareCount });
   for (const card of cards) {
+    if (state.superseded) return; // a newer refresh owns the cards now
     try {
       await client.chat.update({
         channel: card.slack_channel_id,
@@ -121,7 +127,7 @@ async function refreshCards({ db, client, logger }, post) {
     } catch (err) {
       logger.warn(`Card counter update failed: ${err.data?.error || err.message}`);
     }
-    if (shareCount === 1) {
+    if (shareCount === 1 && !state.superseded) {
       try {
         await client.reactions.add({
           channel: card.slack_channel_id,
