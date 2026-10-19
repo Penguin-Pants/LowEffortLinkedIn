@@ -11,6 +11,22 @@ const { buildPostCard } = require('../blocks/postCard');
 const { loadPostCards } = require('../db/postCards');
 const { startCronJob } = require('./cronJob');
 
+// chat.update errors (https://docs.slack.dev/reference/methods/chat.update)
+// that fail the same way on every run. Retrying them without limit would log
+// the same error forever; the share pipeline rejects clicks on expired posts
+// on its own, so a card that can't be updated still can't be shared from.
+// Permanent: the card is gone or the bot may never edit it. Closed at once.
+const UNUPDATABLE_CARD_ERRORS = new Set([
+  'message_not_found',
+  'invalid_channel_id',
+  'cant_update_message',
+]);
+// Reversible: the channel can be unarchived, the bot re-invited to a private
+// channel, or the workspace's edit window reopened. Keep retrying for a
+// grace period so a restored card still loses its buttons, then give up.
+const REVERSIBLE_CARD_ERRORS = new Set(['channel_not_found', 'is_inactive', 'edit_window_closed']);
+const REVERSIBLE_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+
 // Due = past its window, still has a live card, and hasn't been closed out
 // yet (expired_at is the idempotency stamp — set only after a successful
 // chat.update, mirroring the token-reminder job's pattern).
@@ -25,9 +41,9 @@ function findPostsToExpire(db, now = new Date()) {
 
 // One pass of the job. A post can have been broadcast to several channels, so
 // every card is stripped of its buttons. The stamp is written only after all
-// of a post's cards update successfully, so a partial failure retries the
-// whole post on the next run (chat.update is idempotent); one post's failure
-// never blocks the rest.
+// of a post's cards are closed (updated, or permanently un-updatable), so a
+// recoverable failure retries the whole post on the next run (chat.update is
+// idempotent); one post's failure never blocks the rest.
 async function runPostExpiry({ db, slackClient, logger = console }, now = new Date()) {
   const due = await findPostsToExpire(db, now);
   let closed = 0;
@@ -50,10 +66,21 @@ async function runPostExpiry({ db, slackClient, logger = console }, now = new Da
             blocks,
           });
         } catch (err) {
+          const reason = err.data?.error || err.message;
+          const graceOver = now - new Date(post.expires_at) >= REVERSIBLE_RETRY_MS;
+          if (
+            UNUPDATABLE_CARD_ERRORS.has(err.data?.error) ||
+            (graceOver && REVERSIBLE_CARD_ERRORS.has(err.data?.error))
+          ) {
+            logger.warn(
+              `Post expiry: card for post ${post.id} in ${card.slack_channel_id} can't be updated ` +
+                `(${reason}); treating it as closed`
+            );
+            continue;
+          }
           allClosed = false;
           logger.error(
-            `Post expiry close failed for post ${post.id} card ${card.slack_channel_id}: ` +
-              `${err.data?.error || err.message}`
+            `Post expiry close failed for post ${post.id} card ${card.slack_channel_id}: ${reason}`
           );
         }
       }
@@ -85,4 +112,4 @@ function startPostExpiryJob({ config, db, logger = console }, overrides = {}) {
   });
 }
 
-module.exports = { findPostsToExpire, runPostExpiry, startPostExpiryJob };
+module.exports = { findPostsToExpire, runPostExpiry, startPostExpiryJob, REVERSIBLE_RETRY_MS };
