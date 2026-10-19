@@ -61,7 +61,7 @@ function fakeDb({
   shareSettleError = null,
   cards = null,
 } = {}) {
-  // Each inserted share row, mutated in place by later updates — so a test
+  // Each inserted share row, mutated in place by later updates, so a test
   // sees the row's final state (a 'pending' reservation settled to
   // 'success' or 'failed').
   const shareInserts = [];
