@@ -4,6 +4,7 @@ const {
   buildConnectUrl,
   sendConnectPrompt,
   getConnection,
+  clearConnection,
 } = require('../src/slack/connectPrompt');
 
 const STATE_SECRET = 'state-secret';
@@ -79,5 +80,34 @@ describe('getConnection', () => {
     await expect(
       getConnection(dbReturning({ ...connected, token_expires_at: new Date(0) }), 'U777')
     ).resolves.toBeNull();
+  });
+});
+
+describe('clearConnection', () => {
+  test("nulls the person's LinkedIn token, identity, expiry and reminder stamp", async () => {
+    const calls = [];
+    const db = (table) => ({
+      where: (cond) => ({
+        update: async (patch) => {
+          calls.push({ table, cond, patch });
+          return 1;
+        },
+      }),
+    });
+    db.fn = { now: () => 'NOW' };
+    await clearConnection(db, 'U777');
+    expect(calls).toEqual([
+      {
+        table: 'users',
+        cond: { slack_user_id: 'U777' },
+        patch: {
+          linkedin_access_token: null,
+          linkedin_person_id: null,
+          token_expires_at: null,
+          expiry_reminder_sent_at: null,
+          updated_at: 'NOW',
+        },
+      },
+    ]);
   });
 });

@@ -3,7 +3,7 @@
 // inserts the post, broadcasts the card, and stores the card's channel/ts.
 
 const copy = require('../copy');
-const { buildPostCard } = require('../blocks/postCard');
+const { buildPostCard, postCardText } = require('../blocks/postCard');
 const { escapeMrkdwn } = require('../mrkdwn');
 const { postEphemeralSafely } = require('../slack/ephemeral');
 const { recordPostCards } = require('../db/postCards');
@@ -211,7 +211,7 @@ async function publishPost({ db, client, config, logger }, { parsed, userId, ori
     try {
       const broadcast = await client.chat.postMessage({
         channel: channelId,
-        text: `New post ready to share: ${parsed.destination_url}`,
+        text: postCardText(post),
         blocks: buildPostCard({ post, shareCount: 0 }),
         unfurl_links: true,
       });

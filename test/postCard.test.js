@@ -1,4 +1,4 @@
-const { buildPostCard } = require('../src/blocks/postCard');
+const { buildPostCard, isPostExpired, postCardText } = require('../src/blocks/postCard');
 
 function post(overrides = {}) {
   return {
@@ -134,5 +134,31 @@ describe('buildPostCard', () => {
       expect(blocks.some((b) => b.type === 'section' && b.text.text === 'B text')).toBe(true);
       expect(blocks.some((b) => b.type === 'actions')).toBe(false);
     });
+  });
+});
+
+describe('isPostExpired', () => {
+  const now = new Date('2026-07-02T09:00:00Z');
+
+  test('a post with no expiry never expires', () => {
+    expect(isPostExpired({ expires_at: null }, now)).toBe(false);
+  });
+
+  test('expired at or after expires_at, open before it', () => {
+    expect(isPostExpired({ expires_at: new Date(now.getTime() - 1) }, now)).toBe(true);
+    expect(isPostExpired({ expires_at: now }, now)).toBe(true);
+    expect(isPostExpired({ expires_at: new Date(now.getTime() + 1) }, now)).toBe(false);
+  });
+
+  test('accepts the ISO string a DB driver may return', () => {
+    expect(isPostExpired({ expires_at: '2026-07-01T00:00:00Z' }, now)).toBe(true);
+  });
+});
+
+describe('postCardText', () => {
+  test('is the notification/fallback text for every card send and update', () => {
+    expect(postCardText({ destination_url: 'https://example.com/a' })).toBe(
+      'New post ready to share: https://example.com/a'
+    );
   });
 });
