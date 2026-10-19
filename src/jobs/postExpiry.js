@@ -22,7 +22,7 @@ const UNUPDATABLE_CARD_ERRORS = new Set([
   'cant_update_message',
 ]);
 // Reversible: the channel can be unarchived, the bot re-invited to a private
-// channel, or the workspace's edit window reopened. Keep retrying for a
+// channel or the workspace's edit window reopened. Keep retrying for a
 // grace period so a restored card still loses its buttons, then give up.
 const REVERSIBLE_CARD_ERRORS = new Set(['channel_not_found', 'is_inactive', 'edit_window_closed']);
 const REVERSIBLE_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
@@ -41,7 +41,7 @@ function findPostsToExpire(db, now = new Date()) {
 
 // One pass of the job. A post can have been broadcast to several channels, so
 // every card is stripped of its buttons. The stamp is written only after all
-// of a post's cards are closed (updated, or permanently un-updatable), so a
+// of a post's cards are closed (updated or permanently un-updatable), so a
 // recoverable failure retries the whole post on the next run (chat.update is
 // idempotent); one post's failure never blocks the rest.
 async function runPostExpiry({ db, slackClient, logger = console }, now = new Date()) {

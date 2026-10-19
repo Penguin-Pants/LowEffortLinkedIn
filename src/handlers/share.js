@@ -230,7 +230,7 @@ async function sharePipeline(
     }
 
     // Durable idempotency pre-check (Decision #12): one successful share per
-    // person per post, any variation, and no second run while one is pending.
+    // person per post, any variation. No second run while one is pending.
     const active = await findActiveShare(db, postId, userId);
     if (active) {
       await respondToActiveShare({ db, client, logger }, active, { channelId, userId });
