@@ -14,8 +14,9 @@ const DEFAULT_LINKEDIN_API_VERSION = '202610';
 // Warn one month before the guaranteed support window can end.
 const LINKEDIN_VERSION_WARN_MONTHS = 11;
 
-// True when a YYYYMM version is old enough that LinkedIn may sunset it soon
-// (or already has). A malformed value is stale too: LinkedIn rejects it.
+// True when LinkedIn may reject a YYYYMM version: old enough to be near or
+// past sunset, later than the current month (not released yet), or
+// malformed.
 function isLinkedinVersionStale(version, now = new Date()) {
   const match = /^(\d{4})(\d{2})$/.exec(version || '');
   if (!match) return true;
@@ -23,7 +24,7 @@ function isLinkedinVersionStale(version, now = new Date()) {
   if (month < 1 || month > 12) return true;
   const ageMonths =
     now.getUTCFullYear() * 12 + now.getUTCMonth() - (Number(match[1]) * 12 + month - 1);
-  return ageMonths >= LINKEDIN_VERSION_WARN_MONTHS;
+  return ageMonths < 0 || ageMonths >= LINKEDIN_VERSION_WARN_MONTHS;
 }
 
 function loadConfig(env = process.env) {

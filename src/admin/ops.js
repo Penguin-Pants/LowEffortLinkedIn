@@ -39,13 +39,13 @@ async function probeSlack(slackClient) {
 // configuration state, not live connectivity, which is enough to catch the
 // "forgot to set the client secret after flipping mock mode off" class of
 // mistake this UI exists to prevent.
-// A stale LINKEDIN_API_VERSION reads as not-ok too: every real share would
-// fail with 426 once LinkedIn sunsets it.
+// A stale LINKEDIN_API_VERSION reads as not-ok too: LinkedIn rejects an
+// unreleased or sunset version on every real share.
 function probeLinkedin(config, now = new Date()) {
   if (config.linkedinMockMode) return 'mock';
   if (!(config.linkedinClientId && config.linkedinClientSecret)) return 'not configured';
   if (isLinkedinVersionStale(config.linkedinVersion, now)) {
-    return `configured (API version ${config.linkedinVersion} is near or past sunset)`;
+    return `configured (API version ${config.linkedinVersion} is unreleased or near/past sunset)`;
   }
   return 'configured';
 }

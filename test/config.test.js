@@ -134,6 +134,12 @@ describe('LinkedIn API version', () => {
     expect(isLinkedinVersionStale('202610', now)).toBe(false);
   });
 
+  test('flags a version later than the current month (LinkedIn has not released it)', () => {
+    const now = new Date('2026-10-19T00:00:00Z');
+    expect(isLinkedinVersionStale('202611', now)).toBe(true);
+    expect(isLinkedinVersionStale('203001', now)).toBe(true);
+  });
+
   test('treats a missing or malformed version as stale', () => {
     expect(isLinkedinVersionStale(undefined)).toBe(true);
     expect(isLinkedinVersionStale('2026')).toBe(true);
