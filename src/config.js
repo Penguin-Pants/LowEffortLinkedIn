@@ -8,8 +8,8 @@ const MAX_POST_EXPIRY_HOURS = 720; // 30 days
 
 // LinkedIn-Version header (YYYYMM). LinkedIn supports each monthly version
 // for at least 12 months, then rejects it with 426 NONEXISTENT_VERSION
-// (https://learn.microsoft.com/en-us/linkedin/marketing/versioning) —
-// bump this default at least once a year.
+// (https://learn.microsoft.com/en-us/linkedin/marketing/versioning).
+// Bump this default at least once a year.
 const DEFAULT_LINKEDIN_API_VERSION = '202610';
 // Warn one month before the guaranteed support window can end.
 const LINKEDIN_VERSION_WARN_MONTHS = 11;
