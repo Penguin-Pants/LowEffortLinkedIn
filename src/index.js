@@ -6,6 +6,14 @@ const { createServer } = require('./server');
 const { startExpiryReminderJob } = require('./jobs/expiryReminder');
 const { startPostExpiryJob } = require('./jobs/postExpiry');
 const { loadOverrides, mergeEffectiveConfig } = require('./admin/overrides');
+const { drainSharePipelines } = require('./handlers/share');
+
+// Graceful shutdown budget: share pipelines get SHARE_DRAIN_MS to finish,
+// inside the hard SHUTDOWN_BACKSTOP_MS force-exit, leaving time to close the
+// pool. A pipeline still running at the drain deadline keeps its 'pending'
+// shares row, which blocks a blind duplicate retry (handlers/share.js).
+const SHUTDOWN_BACKSTOP_MS = 10000;
+const SHARE_DRAIN_MS = 7000;
 
 async function main() {
   // envConfig is the pristine, never-mutated snapshot of Railway's env vars.
@@ -68,8 +76,11 @@ async function main() {
       ` default / ${config.postExpiryCron})`
   );
 
-  // Railway sends SIGTERM on redeploys; drain in-flight requests and release
-  // the pool instead of dropping them mid-handler.
+  // Railway sends SIGTERM on redeploys; stop taking requests, let running
+  // share pipelines finish, then release the pool instead of dropping them
+  // mid-handler. app.stop() alone is not enough: Bolt acks each interaction
+  // before its handler runs, so the HTTP server closes while pipelines are
+  // still between the LinkedIn post and the shares row.
   const shutdown = async (signal) => {
     console.log(`${signal} received, shutting down`);
     // db.destroy() waits on pending pool acquires, which can stall for the
@@ -78,11 +89,14 @@ async function main() {
     setTimeout(() => {
       console.error('Graceful shutdown stalled, forcing exit');
       process.exit(1);
-    }, 10000).unref();
+    }, SHUTDOWN_BACKSTOP_MS).unref();
     try {
       jobs.reminderJob.stop();
       jobs.postExpiryJob.stop();
       await app.stop();
+      if (!(await drainSharePipelines(SHARE_DRAIN_MS))) {
+        console.warn('Share pipelines still running at shutdown; their pending rows block duplicate retries');
+      }
       await db.destroy();
       process.exit(0);
     } catch (err) {

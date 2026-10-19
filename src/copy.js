@@ -31,4 +31,8 @@ module.exports = {
     `🏆 *Top sharers, last ${days} days* — ${total} share${total === 1 ? '' : 's'} total`,
   C11_EMPTY: 'No shares in this window yet — be the first! 👀',
   C12: '⏰ Sharing for this post has closed. Keep an eye out for the next one!',
+  C13: "⏳ Your share of this post is already on its way. Hang tight, you'll get a confirmation here.",
+  C14:
+    "⚠️ We couldn't confirm whether your last share of this post reached LinkedIn. " +
+    "Check your LinkedIn profile first. If it isn't there, click Share again.",
 };

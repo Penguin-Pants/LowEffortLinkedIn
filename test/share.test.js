@@ -4,6 +4,8 @@ const { loadConfig } = require('../src/config');
 const { encryptToken } = require('../src/crypto/tokenCipher');
 const {
   runSharePipeline,
+  drainSharePipelines,
+  PENDING_STALE_MS,
   buildCustomShareModal,
   registerShareHandlers,
   CUSTOM_MODAL_CALLBACK_ID,
@@ -56,9 +58,14 @@ function fakeDb({
   existingShare = null,
   successCount = 1,
   shareInsertError = null,
+  shareSettleError = null,
   cards = null,
 } = {}) {
+  // Each inserted share row, mutated in place by later updates, so a test
+  // sees the row's final state (a 'pending' reservation settled to
+  // 'success' or 'failed').
   const shareInserts = [];
+  const shareUpdates = [];
   const userUpdates = [];
   // Default to a single card mirroring the post's primary columns, so
   // single-channel behavior is unchanged; pass `cards` to exercise fan-out.
@@ -76,14 +83,28 @@ function fakeDb({
     }
     if (table === 'shares') {
       return {
-        where: () => ({
-          first: async () => existingShare,
-          count: async () => [{ count: String(successCount) }],
-        }),
-        insert: async (row) => {
-          if (shareInsertError && row.status === 'success') throw shareInsertError;
-          shareInserts.push(row);
+        where: (criteria) => {
+          const scoped = {
+            whereIn: () => scoped,
+            first: async () => existingShare,
+            count: async () => [{ count: String(successCount) }],
+            update: async (patch) => {
+              if (shareSettleError && patch.status === 'success') throw shareSettleError;
+              shareUpdates.push({ criteria, patch });
+              const row = shareInserts.find((r) => r.id === criteria.id);
+              if (row && (!criteria.status || row.status === criteria.status)) Object.assign(row, patch);
+            },
+          };
+          return scoped;
         },
+        insert: (row) => ({
+          returning: async () => {
+            if (shareInsertError) throw shareInsertError;
+            const stored = { ...row, id: `share-${shareInserts.length + 1}` };
+            shareInserts.push(stored);
+            return [{ id: stored.id }];
+          },
+        }),
       };
     }
     if (table === 'users') {
@@ -99,7 +120,7 @@ function fakeDb({
     throw new Error(`unexpected table ${table}`);
   };
   db.fn = { now: () => new Date() };
-  return { db, shareInserts, userUpdates };
+  return { db, shareInserts, shareUpdates, userUpdates };
 }
 
 function fakeClient() {
@@ -339,7 +360,7 @@ describe('runSharePipeline', () => {
   });
 
   test('already shared (pre-check) → C4, no LinkedIn call', async () => {
-    const d = deps({ dbParts: fakeDb({ existingShare: { id: 'share-0' } }) });
+    const d = deps({ dbParts: fakeDb({ existingShare: { id: 'share-0', status: 'success' } }) });
     await runSharePipeline(d, JOB);
     expect(d.shareClient.createPost).not.toHaveBeenCalled();
     expect(d.client.chat.postEphemeral.mock.calls[0][0].text).toBe(copy.C4);
@@ -361,12 +382,77 @@ describe('runSharePipeline', () => {
     expect(d.shareClient.createPost).toHaveBeenCalledTimes(1);
   });
 
-  test('unique violation on insert (layer-2 race) → C4', async () => {
+  test('unique violation on the reservation (layer-2 race) → no LinkedIn call, in-progress message', async () => {
     const err = Object.assign(new Error('duplicate key'), { code: '23505' });
     const d = deps({ dbParts: fakeDb({ shareInsertError: err }) });
     await runSharePipeline(d, JOB);
-    expect(d.client.chat.postEphemeral.mock.calls[0][0].text).toBe(copy.C4);
+    expect(d.shareClient.createPost).not.toHaveBeenCalled();
+    expect(d.client.chat.postEphemeral.mock.calls[0][0].text).toBe(copy.C13);
     expect(d.client.chat.update).not.toHaveBeenCalled();
+  });
+
+  test('the share is reserved as pending before LinkedIn is called', async () => {
+    const dbParts = fakeDb();
+    const shareClient = okShareClient();
+    let statusAtPostTime;
+    shareClient.createPost.mockImplementation(async () => {
+      statusAtPostTime = dbParts.shareInserts.map((r) => r.status);
+      return 'urn:li:share:new1';
+    });
+    await runSharePipeline(deps({ dbParts, shareClient }), JOB);
+    expect(statusAtPostTime).toEqual(['pending']);
+    expect(dbParts.shareInserts).toEqual([expect.objectContaining({ status: 'success' })]);
+  });
+
+  test('saving the result fails after LinkedIn accepted the post → "shared", never "try again"', async () => {
+    // A retry here would publish the same post twice; the pending row
+    // stays behind to block it.
+    const dbParts = fakeDb({ shareSettleError: new Error('connection terminated') });
+    const d = deps({ dbParts });
+    await runSharePipeline(d, JOB);
+
+    expect(d.shareClient.createPost).toHaveBeenCalledTimes(1);
+    expect(dbParts.shareInserts).toEqual([expect.objectContaining({ status: 'pending' })]);
+    const texts = d.client.chat.postEphemeral.mock.calls.map((c) => c[0].text);
+    expect(texts).toEqual([copy.C3]);
+  });
+
+  test('a fresh pending share (another run in flight, e.g. across a restart) → C13, no LinkedIn call', async () => {
+    const existingShare = { id: 'share-0', status: 'pending', shared_at: new Date() };
+    const d = deps({ dbParts: fakeDb({ existingShare }) });
+    await runSharePipeline(d, JOB);
+    expect(d.shareClient.createPost).not.toHaveBeenCalled();
+    expect(d._dbParts.shareUpdates).toHaveLength(0);
+    expect(d.client.chat.postEphemeral.mock.calls[0][0].text).toBe(copy.C13);
+  });
+
+  test('a stale pending share → closed as failed, C14 asks the person to check LinkedIn first', async () => {
+    const existingShare = {
+      id: 'share-0',
+      status: 'pending',
+      shared_at: new Date(Date.now() - PENDING_STALE_MS - 1000),
+    };
+    const d = deps({ dbParts: fakeDb({ existingShare }) });
+    await runSharePipeline(d, JOB);
+    expect(d.shareClient.createPost).not.toHaveBeenCalled();
+    expect(d._dbParts.shareUpdates).toEqual([
+      {
+        criteria: { id: 'share-0', status: 'pending' },
+        patch: expect.objectContaining({ status: 'failed' }),
+      },
+    ]);
+    expect(d.client.chat.postEphemeral.mock.calls[0][0].text).toBe(copy.C14);
+  });
+
+  test('an unexpected error before LinkedIn is called releases the reservation', async () => {
+    const logger = { ...quietLogger, info: jest.fn(() => { throw new Error('logger broke'); }) };
+    const d = { ...deps(), logger };
+    await runSharePipeline(d, JOB);
+    expect(d.shareClient.createPost).not.toHaveBeenCalled();
+    expect(d._dbParts.shareInserts).toEqual([
+      expect.objectContaining({ status: 'failed', error_message: 'pipeline error: logger broke' }),
+    ]);
+    expect(d.client.chat.postEphemeral.mock.calls[0][0].text).toMatch(/please try again/);
   });
 
   test('LinkedIn failure → failed row recorded, C6 with the error surfaced', async () => {
@@ -490,6 +576,42 @@ describe('runSharePipeline', () => {
     await runSharePipeline(d, { ...JOB, variation: 'C' });
     expect(d.shareClient.createPost).not.toHaveBeenCalled();
     expect(d.client.chat.postEphemeral.mock.calls[0][0].text).toContain('no longer available');
+  });
+});
+
+describe('drainSharePipelines', () => {
+  function gatedDeps() {
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const shareClient = okShareClient();
+    shareClient.createPost.mockImplementation(() => gate.then(() => 'urn:li:share:new1'));
+    return { d: deps({ shareClient }), release };
+  }
+
+  test('resolves true at once when nothing is running', async () => {
+    await expect(drainSharePipelines(10)).resolves.toBe(true);
+  });
+
+  test('waits for a running pipeline to record its share', async () => {
+    const { d, release } = gatedDeps();
+    const run = runSharePipeline(d, JOB);
+    const drained = drainSharePipelines(5000);
+    await new Promise((r) => setImmediate(r));
+    expect(d._dbParts.shareInserts[0].status).toBe('pending');
+    release();
+    await expect(drained).resolves.toBe(true);
+    expect(d._dbParts.shareInserts[0].status).toBe('success');
+    await run;
+  });
+
+  test('gives up after the timeout and reports false', async () => {
+    const { d, release } = gatedDeps();
+    const run = runSharePipeline(d, JOB);
+    await expect(drainSharePipelines(20)).resolves.toBe(false);
+    release();
+    await run;
   });
 });
 

@@ -21,9 +21,19 @@ const CUSTOM_MODAL_CALLBACK_ID = 'share_custom_modal';
 const SHARE_ACTION_PATTERN = /^share_variation_[abc]$/;
 const PG_UNIQUE_VIOLATION = '23505';
 
+// A pending share older than this can only be a pipeline that was cut off
+// (crash, redeploy) or one whose result could not be saved: every live step
+// is bounded by HTTP timeouts far below it.
+const PENDING_STALE_MS = 5 * 60 * 1000;
+
 // Layer 1 of the idempotency guard (§2.3 step 2): absorbs double-clicks
-// in-process. Layer 2 is the partial unique index on shares.
+// in-process. Layer 2 is the partial unique index on shares, which covers
+// the 'pending' reservation row each run inserts before calling LinkedIn.
 const inFlight = new Set();
+// Every pipeline promise still running, so shutdown can wait for them
+// (drainSharePipelines) instead of cutting one off between the LinkedIn post
+// and its shares row.
+const runningPipelines = new Set();
 
 // A 401 means the member revoked the token — but only on LinkedIn's REST
 // endpoints. The image CDN PUT (pre-signed URL) can 401 for its own reasons
@@ -104,15 +114,71 @@ async function updateCardCounter({ db, client, logger }, post) {
   }
 }
 
+// The person's reservation or successful share for this post, if any.
+function findActiveShare(db, postId, userId) {
+  return db('shares')
+    .where({ post_id: postId, slack_user_id: userId })
+    .whereIn('status', ['pending', 'success'])
+    .first();
+}
+
+// One successful share per person per post (Decision #12), and never a blind
+// retry of a share whose outcome is unknown. A stale reservation is closed
+// as failed so the person's next click (after checking LinkedIn) can proceed.
+async function respondToActiveShare({ db, client, logger }, share, { channelId, userId }) {
+  if (share.status === 'success') {
+    await postEphemeralSafely({ client, logger }, channelId, userId, copy.C4);
+    return;
+  }
+  if (Date.now() - new Date(share.shared_at).getTime() < PENDING_STALE_MS) {
+    await postEphemeralSafely({ client, logger }, channelId, userId, copy.C13);
+    return;
+  }
+  await db('shares').where({ id: share.id, status: 'pending' }).update({
+    status: 'failed',
+    error_message: 'outcome unknown: the share was interrupted before its result was saved',
+  });
+  await postEphemeralSafely({ client, logger }, channelId, userId, copy.C14);
+}
+
 // Steps 1–6 of §2.3. Runs after the interaction is acked; all feedback is
 // ephemeral in the channel where the user clicked.
-async function runSharePipeline(
+async function runSharePipeline(deps, job) {
+  const run = sharePipeline(deps, job);
+  runningPipelines.add(run);
+  try {
+    return await run;
+  } finally {
+    runningPipelines.delete(run);
+  }
+}
+
+// -> true once every pipeline running now has finished, false if timeoutMs
+// passed first. Bolt acks the interaction before the pipeline runs, so
+// stopping the HTTP server alone does not wait for them.
+async function drainSharePipelines(timeoutMs) {
+  if (runningPipelines.size === 0) return true;
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  const finished = Promise.allSettled([...runningPipelines]).then(() => true);
+  const drained = await Promise.race([finished, timedOut]);
+  clearTimeout(timer);
+  return drained;
+}
+
+async function sharePipeline(
   { config, db, shareClient, client, logger, fetchFile = fetchSlackFile },
   { postId, variation, customText, userId, channelId }
 ) {
   const lockKey = `${postId}:${userId}`;
   if (inFlight.has(lockKey)) return; // double-click; first click's outcome is coming
   inFlight.add(lockKey);
+  // Set once the reservation row exists / once LinkedIn has accepted the
+  // post; the catch-all below needs both to pick a truthful message.
+  let shareId = null;
+  let published = false;
   try {
     const post = await db('posts').where({ id: postId }).first();
     if (!post) {
@@ -129,12 +195,10 @@ async function runSharePipeline(
     }
 
     // Durable idempotency pre-check (Decision #12): one successful share per
-    // person per post, any variation.
-    const already = await db('shares')
-      .where({ post_id: postId, slack_user_id: userId, status: 'success' })
-      .first();
-    if (already) {
-      await postEphemeralSafely({ client, logger }, channelId, userId, copy.C4);
+    // person per post, any variation, and no second run while one is pending.
+    const active = await findActiveShare(db, postId, userId);
+    if (active) {
+      await respondToActiveShare({ db, client, logger }, active, { channelId, userId });
       return;
     }
 
@@ -165,15 +229,36 @@ async function runSharePipeline(
       return;
     }
 
+    // Reserve before anything leaves the process: if the result can't be
+    // saved later (DB error, restart), this row still blocks a blind retry
+    // that would publish the same post twice.
+    try {
+      [{ id: shareId }] = await db('shares')
+        .insert({
+          post_id: postId,
+          slack_user_id: userId,
+          variation,
+          custom_text: variation === 'CUSTOM' ? customText : null,
+          status: 'pending',
+        })
+        .returning('id');
+    } catch (err) {
+      // Layer 2 caught a race the pre-check missed (e.g. across a restart).
+      if (err.code !== PG_UNIQUE_VIOLATION) throw err;
+      const winner = await findActiveShare(db, postId, userId);
+      await postEphemeralSafely(
+        { client, logger },
+        channelId,
+        userId,
+        winner?.status === 'success' ? copy.C4 : copy.C13
+      );
+      return;
+    }
+
     const recordFailure = async (errorMessage) => {
-      await db('shares').insert({
-        post_id: postId,
-        slack_user_id: userId,
-        variation,
-        custom_text: variation === 'CUSTOM' ? customText : null,
-        status: 'failed',
-        error_message: errorMessage.slice(0, 2000),
-      });
+      await db('shares')
+        .where({ id: shareId })
+        .update({ status: 'failed', error_message: errorMessage.slice(0, 2000) });
     };
     const failShare = async (errorMessage) => {
       await recordFailure(errorMessage);
@@ -237,6 +322,7 @@ async function runSharePipeline(
     let postUrn = null;
     try {
       postUrn = await shareClient.createPost({ accessToken, payload });
+      published = true;
     } catch (err) {
       if (is401(err)) {
         await recordFailure('LinkedIn token revoked (401)');
@@ -248,23 +334,9 @@ async function runSharePipeline(
       return;
     }
 
-    try {
-      await db('shares').insert({
-        post_id: postId,
-        slack_user_id: userId,
-        variation,
-        custom_text: variation === 'CUSTOM' ? customText : null,
-        linkedin_post_urn: postUrn,
-        status: 'success',
-      });
-    } catch (err) {
-      // Layer 2 caught a race the pre-check missed (e.g. across a restart).
-      if (err.code === PG_UNIQUE_VIOLATION) {
-        await postEphemeralSafely({ client, logger }, channelId, userId, copy.C4);
-        return;
-      }
-      throw err;
-    }
+    await db('shares')
+      .where({ id: shareId })
+      .update({ status: 'success', linkedin_post_urn: postUrn });
 
     await postEphemeralSafely({ client, logger }, channelId, userId, copy.C3);
     try {
@@ -278,6 +350,23 @@ async function runSharePipeline(
     }
   } catch (err) {
     logger.error('Share pipeline failed', err);
+    if (published) {
+      // LinkedIn already has the post; only saving the result failed. "Try
+      // again" would publish it twice; the pending row blocks that, and
+      // the person hears the truth: it's shared.
+      await postEphemeralSafely({ client, logger }, channelId, userId, copy.C3);
+      return;
+    }
+    if (shareId) {
+      // Nothing reached LinkedIn: release the reservation so a retry works.
+      try {
+        await db('shares')
+          .where({ id: shareId, status: 'pending' })
+          .update({ status: 'failed', error_message: `pipeline error: ${err.message}`.slice(0, 2000) });
+      } catch (releaseErr) {
+        logger.warn(`Could not release share reservation ${shareId}: ${releaseErr.message}`);
+      }
+    }
     await postEphemeralSafely(
       { client, logger },
       channelId,
@@ -448,6 +537,8 @@ function registerShareHandlers(app, { config, db, shareClient, fetchFile }) {
 module.exports = {
   registerShareHandlers,
   runSharePipeline,
+  drainSharePipelines,
+  PENDING_STALE_MS,
   buildCustomShareModal,
   CUSTOM_MODAL_CALLBACK_ID,
 };

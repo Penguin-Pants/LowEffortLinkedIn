@@ -148,9 +148,13 @@ are populated.
    failure on someone's real profile:
    - An in-process lock keyed on `(post_id, slack_user_id)` absorbs double-clicks.
    - A partial unique index on `shares (post_id, slack_user_id) WHERE
-     status = 'success'` (§5) is the durable backstop: one successful share per
-     person per post — any variation — surviving restarts. A repeat attempt gets
-     ephemeral copy string C4 (Decision #12).
+     status IN ('pending','success')` (§5) is the durable backstop: one
+     successful share per person per post (any variation), surviving restarts.
+     A repeat attempt gets ephemeral copy string C4 (Decision #12).
+   - Each run inserts a `pending` row before calling LinkedIn and settles it to
+     `success` or `failed`. A pending row blocks a second run (C13). A pending
+     row older than 5 minutes means the outcome is unknown: it is closed as
+     `failed` and the user is asked to check LinkedIn before retrying (C14).
 3. If the post has an image: download it from Slack (`url_private`, bot token
    auth), then upload it to LinkedIn under **the sharer's token** via the image
    upload flow (§4) to get an image URN. LinkedIn assets belong to the member who
@@ -377,7 +381,7 @@ CREATE TABLE shares (
   variation           TEXT NOT NULL CHECK (variation IN ('A','B','C','CUSTOM')),
   custom_text         TEXT,                 -- set only when variation = 'CUSTOM'
   linkedin_post_urn   TEXT,
-  status              TEXT NOT NULL CHECK (status IN ('success','failed')),
+  status              TEXT NOT NULL CHECK (status IN ('pending','success','failed')),
   error_message       TEXT,
   shared_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -385,9 +389,10 @@ CREATE TABLE shares (
 CREATE INDEX idx_shares_post_id ON shares(post_id);
 CREATE INDEX idx_shares_slack_user_id ON shares(slack_user_id);
 
--- Durable idempotency backstop: one successful share per person per post (§2.3).
+-- Durable idempotency backstop: one successful (or in-progress) share per
+-- person per post (§2.3).
 CREATE UNIQUE INDEX idx_shares_once_per_user_post
-  ON shares(post_id, slack_user_id) WHERE status = 'success';
+  ON shares(post_id, slack_user_id) WHERE status IN ('pending','success');
 ```
 
 Migrations managed via Knex.js (lightweight query builder + migration runner —
@@ -449,6 +454,8 @@ Friendly-casual with emoji (Decision #10). These are the shipping strings;
 | C10 | Unauthorized `/create-post` | 🚫 Sorry, only the marketing team can create posts. Think you should have access? Ask {marketer mention}. |
 | C11 | `/advocacy-stats` (ephemeral) | 🏆 *Top sharers, last {days} days* — {total} shares total<br>1. {mention} — {n} shares<br>2. … (top 10; if no shares: "No shares in this window yet — be the first! 👀") |
 | C12 | Share attempted on an expired post (ephemeral) | ⏰ Sharing for this post has closed. Keep an eye out for the next one! |
+| C13 | Share attempted while the same person's share of the post is still pending (ephemeral) | ⏳ Your share of this post is already on its way. Hang tight, you'll get a confirmation here. |
+| C14 | A pending share's outcome is unknown (stale pending row, ephemeral) | ⚠️ We couldn't confirm whether your last share of this post reached LinkedIn. Check your LinkedIn profile first. If it isn't there, click Share again. |
 
 **Card context line:** `Posted by {marketer mention} · {date} · ✅ {n} shares · Sharing closes {date/time}` (or `· ⏰ Sharing closed` once the window has passed)
 
