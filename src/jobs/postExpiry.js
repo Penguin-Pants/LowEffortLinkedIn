@@ -15,7 +15,7 @@ const { startCronJob } = require('./cronJob');
 // that fail the same way on every run. Retrying them without limit would log
 // the same error forever; the share pipeline rejects clicks on expired posts
 // on its own, so a card that can't be updated still can't be shared from.
-// Permanent: the card is gone or the bot may never edit it — closed at once.
+// Permanent: the card is gone or the bot may never edit it. Closed at once.
 const UNUPDATABLE_CARD_ERRORS = new Set([
   'message_not_found',
   'invalid_channel_id',
@@ -74,7 +74,7 @@ async function runPostExpiry({ db, slackClient, logger = console }, now = new Da
           ) {
             logger.warn(
               `Post expiry: card for post ${post.id} in ${card.slack_channel_id} can't be updated ` +
-                `(${reason}) — treating it as closed`
+                `(${reason}); treating it as closed`
             );
             continue;
           }

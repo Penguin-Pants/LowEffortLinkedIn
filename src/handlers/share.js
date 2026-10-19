@@ -382,13 +382,13 @@ async function sharePipeline(
     logger.error('Share pipeline failed', err);
     if (published) {
       // LinkedIn already has the post; only saving the result failed. "Try
-      // again" would publish it twice — the pending row blocks that, and
+      // again" would publish it twice; the pending row blocks that, and
       // the person hears the truth: it's shared.
       await postEphemeralSafely({ client, logger }, channelId, userId, copy.C3);
       return;
     }
     if (shareId) {
-      // Nothing reached LinkedIn — release the reservation so a retry works.
+      // Nothing reached LinkedIn: release the reservation so a retry works.
       try {
         await db('shares')
           .where({ id: shareId, status: 'pending' })
