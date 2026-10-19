@@ -65,7 +65,9 @@ const cardRefreshQueues = new Map();
 // Slack's WebClient has no request timeout by default, so a hung refresh
 // must not hold the next one (and its share pipeline) forever: after this
 // long the next refresh runs anyway, and the hung one is marked superseded
-// so it writes nothing more if it ever wakes up with its older count.
+// so it writes nothing more if it ever wakes up with its older count. Its
+// request already in flight can't be cancelled and may land after the newer
+// write, so one repair refresh runs once the hung one settles.
 const CARD_REFRESH_WAIT_MS = 20_000;
 
 function queueCardRefresh(postId, refresh) {
@@ -74,7 +76,10 @@ function queueCardRefresh(postId, refresh) {
   let timer;
   const waitCap = new Promise((resolve) => {
     timer = setTimeout(() => {
-      if (previous) previous.state.superseded = true;
+      if (previous) {
+        previous.state.superseded = true;
+        previous.tail.then(() => queueCardRefresh(postId, refresh).catch(() => {}));
+      }
       resolve();
     }, CARD_REFRESH_WAIT_MS);
     timer.unref?.();

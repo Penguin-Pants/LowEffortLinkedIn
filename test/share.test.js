@@ -408,14 +408,19 @@ describe('runSharePipeline', () => {
       const second = runSharePipeline(d, { ...JOB, userId: 'U902' });
       await jest.advanceTimersByTimeAsync(20_000);
       await second; // share 2 wrote count 2 to both cards
-      unhang({ ok: true }); // share 1 wakes up holding count 1
+      const callsBeforeWake = client.chat.update.mock.calls.length;
+      unhang({ ok: true }); // share 1's request for card 1 lands late, holding count 1
       await first;
+      await jest.advanceTimersByTimeAsync(0);
 
-      const lastForCardTwo = client.chat.update.mock.calls
-        .map((c) => c[0])
-        .filter((u) => u.channel === 'C_TWO')
-        .pop();
+      const updates = client.chat.update.mock.calls.map((c) => c[0]);
+      const lastForCardTwo = updates.filter((u) => u.channel === 'C_TWO').pop();
       expect(JSON.stringify(lastForCardTwo.blocks)).toContain('✅ 2 shares');
+      // The late request could not be cancelled, so a repair refresh must
+      // rewrite card 1 with the newest count after it landed.
+      const repairForCardOne = updates.slice(callsBeforeWake).filter((u) => u.channel === 'C_ONE');
+      expect(repairForCardOne).toHaveLength(1);
+      expect(JSON.stringify(repairForCardOne[0].blocks)).toContain('✅ 2 shares');
     } finally {
       unhang?.({ ok: true });
       await first;
