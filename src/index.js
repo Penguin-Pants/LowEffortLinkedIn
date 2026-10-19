@@ -53,8 +53,8 @@ async function main() {
   }
   if (!config.linkedinMockMode && isLinkedinVersionStale(config.linkedinVersion)) {
     console.warn(
-      `LINKEDIN_API_VERSION ${config.linkedinVersion} is unreleased or near/past LinkedIn's sunset ` +
-        '— LinkedIn rejects such versions; set a current YYYYMM version'
+      `LINKEDIN_API_VERSION ${config.linkedinVersion} is unreleased or near/past LinkedIn's sunset. ` +
+        'LinkedIn rejects such versions; set a current YYYYMM version'
     );
   }
   // Mutable holder so the reload controller's cron-job restop (stop the old

@@ -1,4 +1,4 @@
-// Share reservations — the share pipeline now inserts a 'pending' row BEFORE
+// Share reservations: the share pipeline now inserts a 'pending' row BEFORE
 // calling LinkedIn and settles it to 'success' or 'failed' afterward. The
 // once-per-person-per-post unique index covers 'pending' too, so a share
 // whose outcome was never recorded (a DB error after LinkedIn accepted the

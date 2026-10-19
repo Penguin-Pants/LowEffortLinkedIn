@@ -149,7 +149,7 @@ are populated.
    - An in-process lock keyed on `(post_id, slack_user_id)` absorbs double-clicks.
    - A partial unique index on `shares (post_id, slack_user_id) WHERE
      status IN ('pending','success')` (§5) is the durable backstop: one
-     successful share per person per post — any variation — surviving restarts.
+     successful share per person per post (any variation), surviving restarts.
      A repeat attempt gets ephemeral copy string C4 (Decision #12).
    - Each run inserts a `pending` row before calling LinkedIn and settles it to
      `success` or `failed`. A pending row blocks a second run (C13). A pending
@@ -454,8 +454,8 @@ Friendly-casual with emoji (Decision #10). These are the shipping strings;
 | C10 | Unauthorized `/create-post` | 🚫 Sorry, only the marketing team can create posts. Think you should have access? Ask {marketer mention}. |
 | C11 | `/advocacy-stats` (ephemeral) | 🏆 *Top sharers, last {days} days* — {total} shares total<br>1. {mention} — {n} shares<br>2. … (top 10; if no shares: "No shares in this window yet — be the first! 👀") |
 | C12 | Share attempted on an expired post (ephemeral) | ⏰ Sharing for this post has closed. Keep an eye out for the next one! |
-| C13 | Share attempted while the same person's share of the post is still pending (ephemeral) | ⏳ Your share of this post is already on its way — hang tight, you'll get a confirmation here. |
-| C14 | A pending share's outcome is unknown (stale pending row, ephemeral) | ⚠️ We couldn't confirm whether your last share of this post reached LinkedIn. Check your LinkedIn profile first — if it isn't there, click Share again. |
+| C13 | Share attempted while the same person's share of the post is still pending (ephemeral) | ⏳ Your share of this post is already on its way. Hang tight, you'll get a confirmation here. |
+| C14 | A pending share's outcome is unknown (stale pending row, ephemeral) | ⚠️ We couldn't confirm whether your last share of this post reached LinkedIn. Check your LinkedIn profile first. If it isn't there, click Share again. |
 
 **Card context line:** `Posted by {marketer mention} · {date} · ✅ {n} shares · Sharing closes {date/time}` (or `· ⏰ Sharing closed` once the window has passed)
 
