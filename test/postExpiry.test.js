@@ -85,7 +85,7 @@ function fakeDb({ duePosts, successCounts = {}, cardsByPost = {} } = {}) {
 // Mirrors @slack/logger's real Logger interface (no .log) — see
 // test/share.test.js's quietLogger for why this matters: a mock with an
 // extra .log stub masked the exact bug that broke production once already.
-const quiet = { error: jest.fn(), info: jest.fn() };
+const quiet = { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
 describe('runPostExpiry', () => {
   test('rebuilds the card without buttons, preserves the counter, then stamps', async () => {
@@ -146,7 +146,7 @@ describe('runPostExpiry', () => {
         update: jest
           .fn()
           .mockResolvedValueOnce({ ok: true })
-          .mockRejectedValueOnce(Object.assign(new Error('boom'), { data: { error: 'message_not_found' } })),
+          .mockRejectedValueOnce(Object.assign(new Error('boom'), { data: { error: 'internal_error' } })),
       },
     };
 
@@ -155,6 +155,41 @@ describe('runPostExpiry', () => {
     expect(result).toEqual({ due: 1, closed: 0 });
     expect(slackClient.chat.update).toHaveBeenCalledTimes(2); // both attempted
     expect(postUpdates).toHaveLength(0); // not stamped — retries next run
+  });
+
+  test.each([
+    'message_not_found',
+    'channel_not_found',
+    'invalid_channel_id',
+    'cant_update_message',
+    'edit_window_closed',
+    'is_inactive',
+  ])('a card that can never be updated (%s) counts as closed, so the post is not retried forever', async (code) => {
+    const { db, postUpdates } = fakeDb({
+      duePosts: [duePost('post-1')],
+      cardsByPost: {
+        'post-1': [
+          { slack_channel_id: 'C_GONE', slack_message_ts: '1.1' },
+          { slack_channel_id: 'C_OK', slack_message_ts: '2.2' },
+        ],
+      },
+    });
+    const slackClient = {
+      chat: {
+        update: jest
+          .fn()
+          .mockRejectedValueOnce(Object.assign(new Error('boom'), { data: { error: code } }))
+          .mockResolvedValueOnce({ ok: true }),
+      },
+    };
+    const logger = { ...quiet, warn: jest.fn(), error: jest.fn() };
+
+    const result = await runPostExpiry({ db, slackClient, logger }, NOW);
+
+    expect(result).toEqual({ due: 1, closed: 1 });
+    expect(postUpdates).toEqual([expect.objectContaining({ expired_at: 'NOW' })]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(code));
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   test('does nothing when nothing is due', async () => {
@@ -174,7 +209,7 @@ describe('runPostExpiry', () => {
       chat: {
         update: jest
           .fn()
-          .mockRejectedValueOnce(Object.assign(new Error('boom'), { data: { error: 'message_not_found' } }))
+          .mockRejectedValueOnce(Object.assign(new Error('boom'), { data: { error: 'internal_error' } }))
           .mockResolvedValueOnce({ ok: true }),
       },
     };

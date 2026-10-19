@@ -11,6 +11,21 @@ const { buildPostCard } = require('../blocks/postCard');
 const { loadPostCards } = require('../db/postCards');
 const { startCronJob } = require('./cronJob');
 
+// chat.update errors that mean this card can never be updated again — it was
+// deleted, its channel is gone or archived, or the workspace's edit window
+// closed (https://docs.slack.dev/reference/methods/chat.update). Retrying
+// them would repeat the same error every run, forever. Such a card counts as
+// closed: the share pipeline rejects clicks on expired posts on its own.
+// Auth, rate-limit and server errors are left out — they can recover.
+const UNUPDATABLE_CARD_ERRORS = new Set([
+  'message_not_found',
+  'channel_not_found',
+  'invalid_channel_id',
+  'cant_update_message',
+  'edit_window_closed',
+  'is_inactive',
+]);
+
 // Due = past its window, still has a live card, and hasn't been closed out
 // yet (expired_at is the idempotency stamp — set only after a successful
 // chat.update, mirroring the token-reminder job's pattern).
@@ -25,9 +40,9 @@ function findPostsToExpire(db, now = new Date()) {
 
 // One pass of the job. A post can have been broadcast to several channels, so
 // every card is stripped of its buttons. The stamp is written only after all
-// of a post's cards update successfully, so a partial failure retries the
-// whole post on the next run (chat.update is idempotent); one post's failure
-// never blocks the rest.
+// of a post's cards are closed (updated, or permanently un-updatable), so a
+// recoverable failure retries the whole post on the next run (chat.update is
+// idempotent); one post's failure never blocks the rest.
 async function runPostExpiry({ db, slackClient, logger = console }, now = new Date()) {
   const due = await findPostsToExpire(db, now);
   let closed = 0;
@@ -50,10 +65,17 @@ async function runPostExpiry({ db, slackClient, logger = console }, now = new Da
             blocks,
           });
         } catch (err) {
+          const reason = err.data?.error || err.message;
+          if (UNUPDATABLE_CARD_ERRORS.has(err.data?.error)) {
+            logger.warn(
+              `Post expiry: card for post ${post.id} in ${card.slack_channel_id} can't be updated ` +
+                `(${reason}) — treating it as closed`
+            );
+            continue;
+          }
           allClosed = false;
           logger.error(
-            `Post expiry close failed for post ${post.id} card ${card.slack_channel_id}: ` +
-              `${err.data?.error || err.message}`
+            `Post expiry close failed for post ${post.id} card ${card.slack_channel_id}: ${reason}`
           );
         }
       }
