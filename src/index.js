@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { loadConfig } = require('./config');
+const { loadConfig, isLinkedinVersionStale } = require('./config');
 const { createDb } = require('./db/knex');
 const { createServer } = require('./server');
 const { startExpiryReminderJob } = require('./jobs/expiryReminder');
@@ -42,6 +42,12 @@ async function main() {
         'and LINKEDIN_REDIRECT_URI are not configured — staying in mock mode'
     );
     config.linkedinMockMode = true;
+  }
+  if (!config.linkedinMockMode && isLinkedinVersionStale(config.linkedinVersion)) {
+    console.warn(
+      `LINKEDIN_API_VERSION ${config.linkedinVersion} is near or past LinkedIn's sunset ` +
+        '— shares fail with 426 once it is retired; set a current YYYYMM version'
+    );
   }
   // Mutable holder so the reload controller's cron-job restop (stop the old
   // task, start a new one with the updated schedule) and this file's

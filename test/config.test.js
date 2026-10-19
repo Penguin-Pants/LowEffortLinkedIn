@@ -1,4 +1,4 @@
-const { loadConfig } = require('../src/config');
+const { loadConfig, isLinkedinVersionStale, DEFAULT_LINKEDIN_API_VERSION } = require('../src/config');
 
 // 32 bytes, base64
 const VALID_KEY = Buffer.alloc(32, 7).toString('base64');
@@ -116,5 +116,27 @@ describe('loadConfig', () => {
     );
     expect(config.adminUiEnabled).toBe(true);
     expect(config.slackClientId).toBe('cid');
+  });
+});
+
+describe('LinkedIn API version', () => {
+  test('defaults LINKEDIN_API_VERSION to a version inside LinkedIn\'s support window', () => {
+    const config = loadConfig(validEnv());
+    expect(config.linkedinVersion).toBe(DEFAULT_LINKEDIN_API_VERSION);
+    expect(isLinkedinVersionStale(config.linkedinVersion, new Date('2026-10-19T00:00:00Z'))).toBe(false);
+  });
+
+  test('flags a version 11 or more months old (LinkedIn supports each for at least 12)', () => {
+    const now = new Date('2026-10-19T00:00:00Z');
+    expect(isLinkedinVersionStale('202506', now)).toBe(true);
+    expect(isLinkedinVersionStale('202511', now)).toBe(true);
+    expect(isLinkedinVersionStale('202512', now)).toBe(false);
+    expect(isLinkedinVersionStale('202610', now)).toBe(false);
+  });
+
+  test('treats a missing or malformed version as stale', () => {
+    expect(isLinkedinVersionStale(undefined)).toBe(true);
+    expect(isLinkedinVersionStale('2026')).toBe(true);
+    expect(isLinkedinVersionStale('202613')).toBe(true);
   });
 });
