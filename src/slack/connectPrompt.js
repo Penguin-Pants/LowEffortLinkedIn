@@ -66,10 +66,24 @@ async function getConnection(db, slackUserId) {
   return row;
 }
 
+// Forget the person's LinkedIn connection (token, identity, expiry and the
+// reminder stamp) but keep the users row and its share history. Used by
+// /disconnect and by the share pipeline on a LinkedIn 401.
+async function clearConnection(db, slackUserId) {
+  await db('users').where({ slack_user_id: slackUserId }).update({
+    linkedin_access_token: null,
+    linkedin_person_id: null,
+    token_expires_at: null,
+    expiry_reminder_sent_at: null,
+    updated_at: db.fn.now(),
+  });
+}
+
 module.exports = {
   buildConnectUrl,
   sendConnectPrompt,
   registerConnectPromptAction,
   getConnection,
+  clearConnection,
   CONNECT_LINK_TTL_SECONDS,
 };

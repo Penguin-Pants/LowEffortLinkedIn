@@ -287,6 +287,86 @@ describe('runSharePipeline', () => {
     expect(JSON.stringify(d.client.chat.update.mock.calls[0][0].blocks)).toContain('✅ 2 shares');
   });
 
+  test('concurrent shares of one post: the card ends on the latest count, never a stale one', async () => {
+    // Without serialization, share 1's count read (taken before share 2's
+    // row existed) can finish last and overwrite share 2's newer number.
+    const dbParts = fakeDb();
+    const innerDb = dbParts.db;
+    let releaseFirstCount;
+    const firstCountGate = new Promise((resolve) => {
+      releaseFirstCount = resolve;
+    });
+    let firstCountSeen;
+    const firstCountCalled = new Promise((resolve) => {
+      firstCountSeen = resolve;
+    });
+    let countCalls = 0;
+    const db = (table) => {
+      const builder = innerDb(table);
+      if (table !== 'shares') return builder;
+      return {
+        ...builder,
+        where: (criteria) => ({
+          ...builder.where(criteria),
+          count: () => {
+            // Snapshot at query time, like a real DB read.
+            const snapshot = dbParts.shareInserts.filter((r) => r.status === 'success').length;
+            countCalls += 1;
+            if (countCalls === 1) {
+              firstCountSeen();
+              return firstCountGate.then(() => [{ count: String(snapshot) }]);
+            }
+            return Promise.resolve([{ count: String(snapshot) }]);
+          },
+        }),
+      };
+    };
+    db.fn = innerDb.fn;
+    const d = { ...deps({ dbParts }), db };
+
+    const first = runSharePipeline(d, { ...JOB, userId: 'U701' });
+    await firstCountCalled;
+    const second = runSharePipeline(d, { ...JOB, userId: 'U702' });
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
+    releaseFirstCount();
+    await Promise.all([first, second]);
+
+    const updates = d.client.chat.update.mock.calls;
+    expect(JSON.stringify(updates[updates.length - 1][0].blocks)).toContain('✅ 2 shares');
+  });
+
+  test('a hung card refresh holds the next share of that post for 20s at most', async () => {
+    jest.useFakeTimers();
+    let unhang;
+    let first;
+    try {
+      const client = fakeClient();
+      // First share's card update hangs (no Slack timeout by default) until
+      // the test ends.
+      client.chat.update.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            unhang = resolve;
+          })
+      );
+      const d = deps({ client });
+      first = runSharePipeline(d, { ...JOB, userId: 'U801' });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(client.chat.update).toHaveBeenCalledTimes(1);
+
+      const second = runSharePipeline(d, { ...JOB, userId: 'U802' });
+      await jest.advanceTimersByTimeAsync(19_000);
+      expect(client.chat.update).toHaveBeenCalledTimes(1); // still waiting its turn
+      await jest.advanceTimersByTimeAsync(1_000);
+      await second;
+      expect(client.chat.update).toHaveBeenCalledTimes(2);
+    } finally {
+      unhang?.({ ok: true });
+      await first;
+      jest.useRealTimers();
+    }
+  });
+
   test('multi-channel post: every card gets the counter update and first-share reaction', async () => {
     const cards = [
       { slack_channel_id: 'C_ONE', slack_message_ts: '1.1' },

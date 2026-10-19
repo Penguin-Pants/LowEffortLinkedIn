@@ -12,6 +12,18 @@ function captionsOf(post) {
   );
 }
 
+// The post's sharing window has passed (the expiry job may not have closed
+// the card yet). Shared by the share pipeline and the custom-share button so
+// the rule can't drift.
+function isPostExpired(post, now = new Date()) {
+  return Boolean(post.expires_at) && new Date(post.expires_at) <= now;
+}
+
+// Notification/fallback `text` for every chat.postMessage/chat.update of a card.
+function postCardText(post) {
+  return `New post ready to share: ${post.destination_url}`;
+}
+
 function buildPostCard({ post, shareCount }) {
   const blocks = [
     {
@@ -91,4 +103,4 @@ function buildPostCard({ post, shareCount }) {
   return blocks;
 }
 
-module.exports = { buildPostCard };
+module.exports = { buildPostCard, isPostExpired, postCardText };

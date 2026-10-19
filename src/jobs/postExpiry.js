@@ -7,7 +7,7 @@
 // so a click landing in the gap between cron runs is still blocked; this job
 // is what makes that visible on the card itself.
 
-const { buildPostCard } = require('../blocks/postCard');
+const { buildPostCard, postCardText } = require('../blocks/postCard');
 const { loadPostCards } = require('../db/postCards');
 const { startCronJob } = require('./cronJob');
 
@@ -61,7 +61,7 @@ async function runPostExpiry({ db, slackClient, logger = console }, now = new Da
           await slackClient.chat.update({
             channel: card.slack_channel_id,
             ts: card.slack_message_ts,
-            text: `New post ready to share: ${post.destination_url}`,
+            text: postCardText(post),
             blocks,
           });
         } catch (err) {
