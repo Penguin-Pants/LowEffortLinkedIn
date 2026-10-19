@@ -5,10 +5,10 @@
 // card counter update → first-share reaction.
 
 const copy = require('../copy');
-const { buildPostCard } = require('../blocks/postCard');
+const { buildPostCard, isPostExpired, postCardText } = require('../blocks/postCard');
 const { decryptToken } = require('../crypto/tokenCipher');
 const { buildSharePayload } = require('../linkedin/posts');
-const { getConnection, sendConnectPrompt } = require('../slack/connectPrompt');
+const { getConnection, clearConnection, sendConnectPrompt } = require('../slack/connectPrompt');
 const { postEphemeralSafely } = require('../slack/ephemeral');
 const { fetchSlackFile } = require('../slack/files');
 const { loadPostCards } = require('../db/postCards');
@@ -53,21 +53,57 @@ const linkedinErrorLogLine = (err) =>
 // their side) — treat identically to "not connected": clear the stored
 // connection so getConnection agrees, then run the connect flow.
 async function handleRevokedToken({ db, config, client }, { userId, channelId }) {
-  await db('users').where({ slack_user_id: userId }).update({
-    linkedin_access_token: null,
-    linkedin_person_id: null,
-    token_expires_at: null,
-    expiry_reminder_sent_at: null,
-    updated_at: db.fn.now(),
-  });
+  await clearConnection(db, userId);
   await sendConnectPrompt({ client, config }, { channelId, userId });
+}
+
+// Card refreshes for one post run one at a time. Two concurrent shares each
+// read the share count; without this, the older read can finish last and
+// leave the card one share behind. In-memory is enough: the app is a single
+// process (PLAN.md §3). post id -> { tail, state } of the latest refresh.
+const cardRefreshQueues = new Map();
+// Slack's WebClient has no request timeout by default, so a hung refresh
+// must not hold the next one (and its share pipeline) forever: after this
+// long the next refresh runs anyway, and the hung one is marked superseded
+// so it writes nothing more if it ever wakes up with its older count. Its
+// request already in flight can't be cancelled and may land after the newer
+// write, so one repair refresh runs once the hung one settles.
+const CARD_REFRESH_WAIT_MS = 20_000;
+
+function queueCardRefresh(postId, refresh) {
+  const previous = cardRefreshQueues.get(postId);
+  const state = { superseded: false };
+  let timer;
+  const waitCap = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      if (previous) {
+        previous.state.superseded = true;
+        previous.tail.then(() => queueCardRefresh(postId, refresh).catch(() => {}));
+      }
+      resolve();
+    }, CARD_REFRESH_WAIT_MS);
+    timer.unref?.();
+  });
+  const run = Promise.race([previous ? previous.tail : Promise.resolve(), waitCap])
+    .finally(() => clearTimeout(timer))
+    .then(() => refresh(state));
+  const entry = { tail: run.catch(() => {}), state };
+  cardRefreshQueues.set(postId, entry);
+  entry.tail.then(() => {
+    if (cardRefreshQueues.get(postId) === entry) cardRefreshQueues.delete(postId);
+  });
+  return run;
 }
 
 // Counter segment of the card's context line (§2.3 step 6), plus the
 // nice-to-have ✅ reaction on the first successful share only. A post can have
 // been broadcast to several channels; every card is refreshed so the counter
 // stays in sync everywhere (one card's Slack failure doesn't block the rest).
-async function updateCardCounter({ db, client, logger }, post) {
+function updateCardCounter(deps, post) {
+  return queueCardRefresh(post.id, (state) => refreshCards(deps, post, state));
+}
+
+async function refreshCards({ db, client, logger }, post, state) {
   // Re-read the row rather than trusting the pipeline's snapshot: a share
   // that lands moments before expires_at races the expiry cron, and
   // rebuilding from a snapshot whose expired_at is still null would put the
@@ -76,9 +112,7 @@ async function updateCardCounter({ db, client, logger }, post) {
   // expires_at as well covers the sliver where the job has updated the card
   // but not stamped expired_at yet.
   const fresh = (await db('posts').where({ id: post.id }).first()) || post;
-  const expiredAt =
-    fresh.expired_at ||
-    (fresh.expires_at && new Date(fresh.expires_at) <= new Date() ? new Date() : null);
+  const expiredAt = fresh.expired_at || (isPostExpired(fresh) ? new Date() : null);
   const cards = await loadPostCards(db, fresh);
   if (cards.length === 0) return;
   const [{ count }] = await db('shares')
@@ -87,17 +121,18 @@ async function updateCardCounter({ db, client, logger }, post) {
   const shareCount = Number(count);
   const blocks = buildPostCard({ post: { ...fresh, expired_at: expiredAt }, shareCount });
   for (const card of cards) {
+    if (state.superseded) return; // a newer refresh owns the cards now
     try {
       await client.chat.update({
         channel: card.slack_channel_id,
         ts: card.slack_message_ts,
-        text: `New post ready to share: ${fresh.destination_url}`,
+        text: postCardText(fresh),
         blocks,
       });
     } catch (err) {
       logger.warn(`Card counter update failed: ${err.data?.error || err.message}`);
     }
-    if (shareCount === 1) {
+    if (shareCount === 1 && !state.superseded) {
       try {
         await client.reactions.add({
           channel: card.slack_channel_id,
@@ -189,7 +224,7 @@ async function sharePipeline(
     // The post-expiry job only removes the card's buttons on its own cron
     // cadence, so a click that lands in that gap (or a stale card left open
     // in someone's browser) must still be rejected here, authoritatively.
-    if (post.expires_at && new Date(post.expires_at) <= new Date()) {
+    if (isPostExpired(post)) {
       await postEphemeralSafely({ client, logger }, channelId, userId, copy.C12);
       return;
     }
@@ -459,7 +494,7 @@ function registerShareHandlers(app, { config, db, shareClient, fetchFile }) {
       // Same authoritative check the pipeline runs (§2.3): don't let the
       // user compose a whole custom caption only to lose it to C12 at
       // submit time because the card's buttons outlived the window.
-      if (post.expires_at && new Date(post.expires_at) <= new Date()) {
+      if (isPostExpired(post)) {
         await postEphemeralSafely({ client, logger }, body.channel?.id, body.user.id, copy.C12);
         return;
       }

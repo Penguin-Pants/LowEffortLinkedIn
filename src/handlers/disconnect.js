@@ -6,6 +6,7 @@
 
 const copy = require('../copy');
 const { escapeMrkdwn } = require('../mrkdwn');
+const { clearConnection } = require('../slack/connectPrompt');
 
 function registerDisconnect(app, { db }) {
   app.command('/disconnect', async ({ command, ack, respond, logger }) => {
@@ -30,13 +31,7 @@ function registerDisconnect(app, { db }) {
         // ON DELETE CASCADE on shares.slack_user_id erases history with the row.
         await db('users').where({ slack_user_id: command.user_id }).del();
       } else {
-        await db('users').where({ slack_user_id: command.user_id }).update({
-          linkedin_access_token: null,
-          linkedin_person_id: null,
-          token_expires_at: null,
-          expiry_reminder_sent_at: null,
-          updated_at: db.fn.now(),
-        });
+        await clearConnection(db, command.user_id);
       }
       await respond({ response_type: 'ephemeral', text: eraseAll ? copy.C8 : copy.C7 });
     } catch (err) {

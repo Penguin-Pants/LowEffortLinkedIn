@@ -287,6 +287,147 @@ describe('runSharePipeline', () => {
     expect(JSON.stringify(d.client.chat.update.mock.calls[0][0].blocks)).toContain('✅ 2 shares');
   });
 
+  test('concurrent shares of one post: the card ends on the latest count, never a stale one', async () => {
+    // Without serialization, share 1's count read (taken before share 2's
+    // row existed) can finish last and overwrite share 2's newer number.
+    const dbParts = fakeDb();
+    const innerDb = dbParts.db;
+    let releaseFirstCount;
+    const firstCountGate = new Promise((resolve) => {
+      releaseFirstCount = resolve;
+    });
+    let firstCountSeen;
+    const firstCountCalled = new Promise((resolve) => {
+      firstCountSeen = resolve;
+    });
+    let countCalls = 0;
+    const db = (table) => {
+      const builder = innerDb(table);
+      if (table !== 'shares') return builder;
+      return {
+        ...builder,
+        where: (criteria) => ({
+          ...builder.where(criteria),
+          count: () => {
+            // Snapshot at query time, like a real DB read.
+            const snapshot = dbParts.shareInserts.filter((r) => r.status === 'success').length;
+            countCalls += 1;
+            if (countCalls === 1) {
+              firstCountSeen();
+              return firstCountGate.then(() => [{ count: String(snapshot) }]);
+            }
+            return Promise.resolve([{ count: String(snapshot) }]);
+          },
+        }),
+      };
+    };
+    db.fn = innerDb.fn;
+    const d = { ...deps({ dbParts }), db };
+
+    const first = runSharePipeline(d, { ...JOB, userId: 'U701' });
+    await firstCountCalled;
+    const second = runSharePipeline(d, { ...JOB, userId: 'U702' });
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
+    releaseFirstCount();
+    await Promise.all([first, second]);
+
+    const updates = d.client.chat.update.mock.calls;
+    expect(JSON.stringify(updates[updates.length - 1][0].blocks)).toContain('✅ 2 shares');
+  });
+
+  test('a hung card refresh holds the next share of that post for 20s at most', async () => {
+    jest.useFakeTimers();
+    let unhang;
+    let first;
+    try {
+      const client = fakeClient();
+      // First share's card update hangs (no Slack timeout by default) until
+      // the test ends.
+      client.chat.update.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            unhang = resolve;
+          })
+      );
+      const d = deps({ client });
+      first = runSharePipeline(d, { ...JOB, userId: 'U801' });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(client.chat.update).toHaveBeenCalledTimes(1);
+
+      const second = runSharePipeline(d, { ...JOB, userId: 'U802' });
+      await jest.advanceTimersByTimeAsync(19_000);
+      expect(client.chat.update).toHaveBeenCalledTimes(1); // still waiting its turn
+      await jest.advanceTimersByTimeAsync(1_000);
+      await second;
+      expect(client.chat.update).toHaveBeenCalledTimes(2);
+    } finally {
+      unhang?.({ ok: true });
+      await first;
+      jest.useRealTimers();
+    }
+  });
+
+  test('a hung refresh that wakes after the wait cap cannot overwrite newer counts', async () => {
+    jest.useFakeTimers();
+    let unhang;
+    let first;
+    try {
+      const cards = [
+        { slack_channel_id: 'C_ONE', slack_message_ts: '1.1' },
+        { slack_channel_id: 'C_TWO', slack_message_ts: '2.2' },
+      ];
+      const dbParts = fakeDb({ cards });
+      const innerDb = dbParts.db;
+      // Count snapshot at query time, like a real DB read.
+      const db = (table) => {
+        const builder = innerDb(table);
+        if (table !== 'shares') return builder;
+        return {
+          ...builder,
+          where: (criteria) => ({
+            ...builder.where(criteria),
+            count: async () => [
+              { count: String(dbParts.shareInserts.filter((r) => r.status === 'success').length) },
+            ],
+          }),
+        };
+      };
+      db.fn = innerDb.fn;
+      const client = fakeClient();
+      // Share 1's update of card 1 hangs past the wait cap.
+      client.chat.update.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            unhang = resolve;
+          })
+      );
+      const d = { ...deps({ dbParts, client }), db };
+
+      first = runSharePipeline(d, { ...JOB, userId: 'U901' });
+      await jest.advanceTimersByTimeAsync(0);
+      const second = runSharePipeline(d, { ...JOB, userId: 'U902' });
+      await jest.advanceTimersByTimeAsync(20_000);
+      await second; // share 2 wrote count 2 to both cards
+      const callsBeforeWake = client.chat.update.mock.calls.length;
+      unhang({ ok: true }); // share 1's request for card 1 lands late, holding count 1
+      await first;
+      await jest.advanceTimersByTimeAsync(0);
+
+      const updates = client.chat.update.mock.calls.map((c) => c[0]);
+      const lastForCardTwo = updates.filter((u) => u.channel === 'C_TWO').pop();
+      expect(JSON.stringify(lastForCardTwo.blocks)).toContain('✅ 2 shares');
+      // The late request could not be cancelled, so a repair refresh must
+      // rewrite card 1 with the newest count after it landed.
+      const repairForCardOne = updates.slice(callsBeforeWake).filter((u) => u.channel === 'C_ONE');
+      expect(repairForCardOne).toHaveLength(1);
+      expect(JSON.stringify(repairForCardOne[0].blocks)).toContain('✅ 2 shares');
+    } finally {
+      unhang?.({ ok: true });
+      await first;
+      jest.useRealTimers();
+    }
+  });
+
   test('multi-channel post: every card gets the counter update and first-share reaction', async () => {
     const cards = [
       { slack_channel_id: 'C_ONE', slack_message_ts: '1.1' },
