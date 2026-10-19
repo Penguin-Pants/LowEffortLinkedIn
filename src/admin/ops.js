@@ -15,6 +15,7 @@
 // Railway's own injected variable.
 
 const { requireAdminSession } = require('./auth');
+const { isLinkedinVersionStale } = require('../config');
 
 async function probeDb(db) {
   try {
@@ -38,9 +39,15 @@ async function probeSlack(slackClient) {
 // configuration state, not live connectivity, which is enough to catch the
 // "forgot to set the client secret after flipping mock mode off" class of
 // mistake this UI exists to prevent.
-function probeLinkedin(config) {
+// A stale LINKEDIN_API_VERSION reads as not-ok too: LinkedIn rejects an
+// unreleased or sunset version on every real share.
+function probeLinkedin(config, now = new Date()) {
   if (config.linkedinMockMode) return 'mock';
-  return config.linkedinClientId && config.linkedinClientSecret ? 'configured' : 'not configured';
+  if (!(config.linkedinClientId && config.linkedinClientSecret)) return 'not configured';
+  if (isLinkedinVersionStale(config.linkedinVersion, now)) {
+    return `configured (API version ${config.linkedinVersion} is unreleased or near/past sunset)`;
+  }
+  return 'configured';
 }
 
 // Railway injects RAILWAY_ENVIRONMENT_NAME; config.nodeEnv is the fallback

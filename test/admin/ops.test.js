@@ -50,11 +50,26 @@ describe('probeDb / probeSlack / probeLinkedin', () => {
     await expect(probeSlack(down)).resolves.toBe('down');
   });
 
+  test('probeLinkedin flags a LinkedIn-Version near or past its sunset', () => {
+    const config = { linkedinMockMode: false, linkedinClientId: 'a', linkedinClientSecret: 'b' };
+    const now = new Date('2026-10-19T00:00:00Z');
+    expect(probeLinkedin({ ...config, linkedinVersion: '202506' }, now)).toBe(
+      'configured (API version 202506 is unreleased or near/past sunset)'
+    );
+    // Mock mode makes no LinkedIn calls, so the version is irrelevant there.
+    expect(probeLinkedin({ linkedinMockMode: true, linkedinVersion: '202506' }, now)).toBe('mock');
+  });
+
   test('probeLinkedin reports mock/configured/not-configured', () => {
     expect(probeLinkedin({ linkedinMockMode: true })).toBe('mock');
-    expect(probeLinkedin({ linkedinMockMode: false, linkedinClientId: 'a', linkedinClientSecret: 'b' })).toBe(
-      'configured'
-    );
+    expect(
+      probeLinkedin({
+        linkedinMockMode: false,
+        linkedinClientId: 'a',
+        linkedinClientSecret: 'b',
+        linkedinVersion: '202610',
+      }, new Date('2026-10-19T00:00:00Z'))
+    ).toBe('configured');
     expect(probeLinkedin({ linkedinMockMode: false, linkedinClientId: null, linkedinClientSecret: null })).toBe(
       'not configured'
     );

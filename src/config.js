@@ -6,6 +6,27 @@
 // drift from the bound this config enforces.
 const MAX_POST_EXPIRY_HOURS = 720; // 30 days
 
+// LinkedIn-Version header (YYYYMM). LinkedIn supports each monthly version
+// for at least 12 months, then rejects it with 426 NONEXISTENT_VERSION
+// (https://learn.microsoft.com/en-us/linkedin/marketing/versioning).
+// Bump this default at least once a year.
+const DEFAULT_LINKEDIN_API_VERSION = '202610';
+// Warn one month before the guaranteed support window can end.
+const LINKEDIN_VERSION_WARN_MONTHS = 11;
+
+// True when LinkedIn may reject a YYYYMM version: old enough to be near or
+// past sunset, later than the current month (not released yet), or
+// malformed.
+function isLinkedinVersionStale(version, now = new Date()) {
+  const match = /^(\d{4})(\d{2})$/.exec(version || '');
+  if (!match) return true;
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return true;
+  const ageMonths =
+    now.getUTCFullYear() * 12 + now.getUTCMonth() - (Number(match[1]) * 12 + month - 1);
+  return ageMonths < 0 || ageMonths >= LINKEDIN_VERSION_WARN_MONTHS;
+}
+
 function loadConfig(env = process.env) {
   const missing = [];
   const req = (name) => {
@@ -106,7 +127,7 @@ function loadConfig(env = process.env) {
     linkedinClientSecret: env.LINKEDIN_CLIENT_SECRET || null,
     linkedinRedirectUri: env.LINKEDIN_REDIRECT_URI || null,
     // Versioned-API header (YYYYMM); override when LinkedIn sunsets the default.
-    linkedinVersion: env.LINKEDIN_API_VERSION || '202506',
+    linkedinVersion: env.LINKEDIN_API_VERSION || DEFAULT_LINKEDIN_API_VERSION,
     // Daily token-expiry reminder schedule (UTC); validated at job start.
     reminderCron: env.REMINDER_CRON || '0 9 * * *',
     defaultPostExpiryHours,
@@ -122,4 +143,4 @@ function loadConfig(env = process.env) {
   };
 }
 
-module.exports = { loadConfig, MAX_POST_EXPIRY_HOURS };
+module.exports = { loadConfig, isLinkedinVersionStale, MAX_POST_EXPIRY_HOURS, DEFAULT_LINKEDIN_API_VERSION };
