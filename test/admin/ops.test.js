@@ -54,7 +54,7 @@ describe('probeDb / probeSlack / probeLinkedin', () => {
     const config = { linkedinMockMode: false, linkedinClientId: 'a', linkedinClientSecret: 'b' };
     const now = new Date('2026-10-19T00:00:00Z');
     expect(probeLinkedin({ ...config, linkedinVersion: '202506' }, now)).toBe(
-      'configured (API version 202506 is near or past sunset)'
+      'configured (API version 202506 is unreleased or near/past sunset)'
     );
     // Mock mode makes no LinkedIn calls, so the version is irrelevant there.
     expect(probeLinkedin({ linkedinMockMode: true, linkedinVersion: '202506' }, now)).toBe('mock');
