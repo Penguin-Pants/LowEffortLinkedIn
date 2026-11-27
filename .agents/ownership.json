@@ -70,8 +70,11 @@
   "project_owned": [
     "AGENTS.md",
     "CLAUDE.md",
+    "README.md",
+    "SECURITY.md",
     "docs/project-context.md",
-    ".gitignore"
+    ".gitignore",
+    ".github/pull_request_template.md"
   ],
   "delete_policy": "report-only",
   "default_ownership": "project-owned"
