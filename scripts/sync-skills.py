@@ -1,5 +1,6 @@
-from pathlib import Path
 import shutil
+from pathlib import Path
+
 from shared_skills import registered, regular
 
 ROOT = Path(__file__).resolve().parents[1]
