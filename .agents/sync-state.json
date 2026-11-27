@@ -1,7 +1,7 @@
 {
   "files": {
     ".agents/conventions.md": "ef9d4694ae54416bfe47cbb9d4f0065cfa7b87bb",
-    ".agents/ownership.json": "dbaec6c742fb0524ce2da24b615e8dde0d9cb4fc",
+    ".agents/ownership.json": "e1ea3d33f01726ab3b71bda30bd47ceadbb8cb43",
     ".agents/project-tiers.md": "c0aabdd58bea88059dff54b789a3e0f96b8a6e19",
     ".agents/shared/instructions.md": "1e56dc5836db7b021021abbc4a98b6668616bd54",
     ".agents/shared/skill-evaluations.json": "0e60926b4ac54b7e4520113cd0fc5556da3a570e",
@@ -56,6 +56,6 @@
     "scripts/validate-skills.py": "01fb10f134e7524590c4ff1e6b1860b0293970bc"
   },
   "repository_id": 1287203613,
-  "revision": "01b780e6429b90d1b7e7e10f3cf47ed504f642e5",
+  "revision": "4fbd1b0a6f092d8b63aa68f057da6f30cac752a0",
   "schema": 1
 }
