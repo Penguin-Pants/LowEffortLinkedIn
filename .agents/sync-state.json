@@ -51,11 +51,11 @@
     ".claude/skills/reviewing-pull-requests/SKILL.md": "80f3a242f95c35c3a9fa3b9b60963cad0e4320d3",
     ".claude/skills/upgrading-dependencies-and-apis/SKILL.md": "286fd219e2e28575d741a2272735a5cc5f086fc1",
     ".github/workflows/skills-check.yml": "8851040d253a75711ed157939c54c2f3a7eac9dc",
-    "scripts/shared_skills.py": "df8738eddfc8adfd6048728223261753e011e35d",
-    "scripts/sync-skills.py": "e6ed0abe4da8ad962abf1ec596a7063b06be27a1",
-    "scripts/validate-skills.py": "555ff7eb1dc9ee75257179abf5519e5d1294c2a2"
+    "scripts/shared_skills.py": "2b8026230193e41e51659eaf78ee9b3b3c342ea7",
+    "scripts/sync-skills.py": "1f9500d628d12c51af1df56d5eaa05a5a8f07b44",
+    "scripts/validate-skills.py": "01fb10f134e7524590c4ff1e6b1860b0293970bc"
   },
   "repository_id": 1287203613,
-  "revision": "28d1b1a1fe371b4967523c8b623c8e6aca6ed9d0",
+  "revision": "01b780e6429b90d1b7e7e10f3cf47ed504f642e5",
   "schema": 1
 }
